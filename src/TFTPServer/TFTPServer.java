@@ -1,10 +1,5 @@
 package TFTPServer;
 
-/*
- * Comments:
- * 		Acks opcode and block is weird. Not what expected.
- */
-
 import java.io.File;
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -60,7 +55,7 @@ public class TFTPServer {
 			} catch (IOException e) {
 				System.err.println("Could not recieve initial packet");
 			} catch (IllegalArgumentException e) {
-				System.err.println(e.getMessage());
+				System.err.println("Recieved package is not a TFTP packet");
 			}
 
 		}

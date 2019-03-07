@@ -26,7 +26,9 @@ import java.nio.file.Paths;
 import TFTPPackets.*;
 
 public class TFTPServerThread implements Runnable {
-	private static final int RETRANSMSSION_TIMEOUT = 5000; // 5 seconds in milliseconds
+	private static final int RETRANSMISSION_TIMEOUT = 5000; // 5 seconds in milliseconds
+	private static final int MAX_RETRANSMISSION = 10;
+	public static final int BUFSIZE = 516;
 	private byte[] recivedBuffer;
 	private byte[] sendBuffer;
 	private final File readDirectory;
@@ -44,6 +46,7 @@ public class TFTPServerThread implements Runnable {
 
 	TFTPServerThread(InetSocketAddress clientAddress, byte[] datagramBuffer, File readDir, File writeDir)
 			throws IllegalArgumentException, SocketException {
+
 		this.clientAddress = clientAddress;
 		readDirectory = readDir;
 		writeDirectory = writeDir;
@@ -56,7 +59,8 @@ public class TFTPServerThread implements Runnable {
 	public void run() {
 		try {
 			short opcode = requestPacket.getOpcode();
-
+			boolean validMode = validMode(requestPacket.getMode());
+					
 			// Connect to client
 			sendSocket.connect(clientAddress);
 
@@ -65,14 +69,14 @@ public class TFTPServerThread implements Runnable {
 					clientAddress.getHostName(), clientAddress.getPort(), Thread.currentThread().getId());
 
 			// Read request
-			if (opcode == OP_RRQ) {
+			if (opcode == OP_RRQ && validMode) {
 				HandleRRQ();
 			}
 			// Write request
-			else if (opcode == OP_WRQ) {
+			else if (opcode == OP_WRQ && validMode) {
 
 			}
-			
+
 			else {
 				sendErrorPacket();
 			}
@@ -89,16 +93,18 @@ public class TFTPServerThread implements Runnable {
 	 * Handles RRQ requests
 	 */
 	private void HandleRRQ() {
+		boolean netasciiMode = false;
 		DataPacket outboundDataPacket;
 		short block = 1;
-		sendBuffer = new byte[TFTPServer.BUFSIZE];
+		sendBuffer = new byte[BUFSIZE];
+		netasciiMode = isNetASCIIMode(requestPacket.getMode());
 
 		// Sends error message if the file doesn't exist
 		if (!fileExists()) {
 			sendErrorPacket();
 			return;
 		}
-		
+
 		try {
 			long sentBytes = 0;
 			long filesize = 0;
@@ -110,22 +116,26 @@ public class TFTPServerThread implements Runnable {
 			outboundDataPacket = new DataPacket(block, sendBuffer);
 			byte[] readData = new byte[512];
 
-			while (sentBytes < filesize) {
-				outboundDataPacket.setBlock(block);
+			int retransmissions = 0;
 
+			while (sentBytes < filesize && retransmissions < MAX_RETRANSMISSION) {
 				int readBytes = readdDataToByteBuffer(readData, fileReader);
+				
+				outboundDataPacket.setBlock(block);
 				outboundDataPacket.setData(readData, readBytes);
+				
 				sendDataPacket(outboundDataPacket);
 
 				// Wait for ack. If no ack or wrong ack, retransmission
 				boolean validAck = false;
-				while (!validAck) {
+				while (!validAck && retransmissions < MAX_RETRANSMISSION) {
 					try {
 						waitForAck();
 						validAck = validAck(block, recivedBuffer);
 
 						if (!validAck) {
 							sendDataPacket(outboundDataPacket);
+							retransmissions++;
 							System.out.println("Wrong ack, retransmitting...");
 						}
 
@@ -139,7 +149,7 @@ public class TFTPServerThread implements Runnable {
 				block++;
 			}
 		} catch (IOException e) {
-			System.err.println("Could not read file");
+			System.err.println(e.getMessage());
 		}
 	}
 
@@ -162,12 +172,21 @@ public class TFTPServerThread implements Runnable {
 	private void sendErrorPacket() {
 
 	}
+	
+	private boolean isNetASCIIMode(String mode) {
+		return mode.toLowerCase().contentEquals("netascii");	
+	}
+	
+	private boolean validMode(String mode) {
+		String modeLowerCase = mode.toLowerCase();
+		return modeLowerCase.contentEquals("netascii") || modeLowerCase.contentEquals("octet");	
+	}
 
 	private void waitForAck() throws IOException, SocketTimeoutException {
 		DatagramPacket ackPack = new DatagramPacket(recivedBuffer, recivedBuffer.length);
 
 		System.out.println("Waiting for ack on thread " + Thread.currentThread().getId());
-		sendSocket.setSoTimeout(RETRANSMSSION_TIMEOUT);
+		sendSocket.setSoTimeout(RETRANSMISSION_TIMEOUT);
 		sendSocket.receive(ackPack);
 		System.out.println("Ack recieved on thread " + Thread.currentThread().getId());
 	}

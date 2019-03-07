@@ -41,7 +41,7 @@ public class ProgramStart {
 			TFTPServer server = new TFTPServer(args[0], args[1], port);
 			server.start();
 		} catch (IOException e) {
-			e.printStackTrace();
+			System.out.println(e.getMessage());
 		}
 	}
 
