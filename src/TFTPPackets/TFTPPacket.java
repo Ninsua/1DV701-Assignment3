@@ -1,5 +1,8 @@
 package TFTPPackets;
 
+import java.io.UnsupportedEncodingException;
+import java.nio.BufferOverflowException;
+
 /*
  * This class and the subsequent subclasses wrap around the provided buffer to simplify handling of the buffers in a TFTP context
  */
@@ -23,7 +26,6 @@ public abstract class TFTPPacket {
 		buf = buffer;
 		byteBuffer = ByteBuffer.wrap(buf);
 		setOpcode(opcode);
-		this.opcode = opcode;
 		length = 2;
 	}
 
@@ -43,8 +45,57 @@ public abstract class TFTPPacket {
 		return byteBuffer.getShort();
 	}
 
+	protected void putShortInBuffer(int position, short shrt) {
+		byteBuffer.position(position);
+		byteBuffer.putShort(shrt);
+	}
+
 	protected void setLengthToPosition() {
 		length = byteBuffer.position();
+	}
+
+	protected String readStringFromBuffer(int index) throws IllegalArgumentException {
+		StringBuilder stringBuilder = new StringBuilder();
+		byteBuffer.position(index);
+
+		try {
+			byte b = byteBuffer.get();
+
+			while (b != 0) {
+				stringBuilder.append((char) b);
+				b = byteBuffer.get();
+			}
+		} catch (BufferUnderflowException e) {
+			throw new IllegalArgumentException();
+		}
+
+		return stringBuilder.toString();
+	}
+
+	// Returns the position in the buffer
+	protected int setStringInBuffer(int startIndex, String message) throws IllegalArgumentException {
+		if (startIndex < 2 || startIndex >= 516)
+			throw new IllegalArgumentException();
+
+		if (message.length() == 0 || (buf.length - startIndex - message.length()) <= 0)
+			throw new IllegalArgumentException();
+
+		byteBuffer.position(startIndex);
+
+		try {
+			byte[] splitMessage = message.getBytes("UTF-8");
+
+			for (int i = 0; i < splitMessage.length; i++) {
+				byteBuffer.put(splitMessage[i]);
+			}
+
+			byte zero = 0;
+			byteBuffer.put(zero);
+		} catch (BufferOverflowException | UnsupportedEncodingException e) {
+			throw new IllegalArgumentException();
+		}
+
+		return byteBuffer.position();
 	}
 
 	public short getOpcode() {
@@ -60,8 +111,7 @@ public abstract class TFTPPacket {
 	}
 
 	public void setOpcode(short newOpcode) {
-		byteBuffer.position(0);
-		byteBuffer.putShort(newOpcode);
+		putShortInBuffer(0, newOpcode);
 		opcode = newOpcode;
 	}
 }

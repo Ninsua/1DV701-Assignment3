@@ -2,56 +2,34 @@ package TFTPPackets;
 
 import java.nio.BufferUnderflowException;
 
-public class DataPacket extends TFTPPacket {
+public class DataPacket extends TFTPBlockPacket {
 	private static final short OP_DAT = 3;
-	private short block;
 
 	// Reads an existing TFTP packet from a buffer. If it does not match, exceptions
 	// are thrown
-	public DataPacket(byte[] datagramBuffer) throws IllegalArgumentException, BufferUnderflowException {
+	public DataPacket(byte[] datagramBuffer, int datagramLength) throws IllegalArgumentException, BufferUnderflowException {
 		super(datagramBuffer);
 
-		if (opcode != OP_DAT) {
+		if (opcode != OP_DAT || datagramLength < 2 || datagramLength > 516) {
 			throw new IllegalArgumentException("Not a data packet");
 		}
 		block = getShortFromBuffer(2);
 
-		length = datagramBuffer.length;
+		length = datagramLength;
 	}
 
 	public DataPacket(short newBlock, byte[] buffer, byte[] data, int len) throws IllegalArgumentException {
-		super(OP_DAT, buffer);
-
-		if (newBlock < 0) {
-			throw new IllegalArgumentException();
-		}
-
-		block = newBlock;
+		super(OP_DAT, newBlock, buffer);
 		setDataToBuffer(data, len);
 		length = data.length + 4;
 	}
 
 	public DataPacket(short newBlock, byte[] buffer) throws IllegalArgumentException {
-		super(OP_DAT, buffer);
-
-		block = newBlock;
+		super(OP_DAT, newBlock, buffer);
 		setDataToBuffer(new byte[] { 0 }, 0);
 		length = 4;
 	}
-
-	public short getBlock() {
-		return block;
-	}
-
-	public void setBlock(short newBlock) throws IllegalArgumentException {
-		if (newBlock < 0) {
-			throw new IllegalArgumentException();
-		}
-		byteBuffer.position(2);
-		byteBuffer.putShort(newBlock);
-		block = newBlock;
-	}
-
+	
 	public byte[] getData() {
 		byte[] data = new byte[length - 4];
 		System.arraycopy(buf, 4, data, 0, length - 4);

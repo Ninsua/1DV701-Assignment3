@@ -31,6 +31,7 @@ public class TFTPServer {
 		ExecutorService threadPool = Executors.newFixedThreadPool(MAX_THREADS);
 
 		// Create socket
+		@SuppressWarnings("resource")
 		DatagramSocket socket = new DatagramSocket(null);
 
 		// Create local bind point

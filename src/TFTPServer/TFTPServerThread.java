@@ -1,16 +1,8 @@
 package TFTPServer;
 
-/*
- * Unix file names: spaces = 0 in bytes, breaks the protocol. Any tips?
- * 
- * TODO:
- * Implement ASCII mode.
- * Implement put
- * implement errors
- */
-
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -26,8 +18,10 @@ import java.nio.file.Paths;
 import TFTPPackets.*;
 
 public class TFTPServerThread implements Runnable {
+	private static final int RECEIVE_TIMEOUT = 10000;
 	private static final int RETRANSMISSION_TIMEOUT = 5000; // 5 seconds in milliseconds
 	private static final int MAX_RETRANSMISSION = 10;
+	private static final int MAX_RECEIVE_ATTEMPTS = 10;
 	public static final int BUFSIZE = 516;
 	private byte[] recivedBuffer;
 	private byte[] sendBuffer;
@@ -60,7 +54,7 @@ public class TFTPServerThread implements Runnable {
 		try {
 			short opcode = requestPacket.getOpcode();
 			boolean validMode = validMode(requestPacket.getMode());
-					
+
 			// Connect to client
 			sendSocket.connect(clientAddress);
 
@@ -70,47 +64,55 @@ public class TFTPServerThread implements Runnable {
 
 			// Read request
 			if (opcode == OP_RRQ && validMode) {
-				HandleRRQ();
+				handleRRQ();
 			}
 			// Write request
 			else if (opcode == OP_WRQ && validMode) {
+				handleWRQ();
+			}
 
+			else if (!validMode) {
+				sendErrorPacket(ErrorCode.NOT_DEFINED, "Unsupported mode");
 			}
 
 			else {
-				sendErrorPacket();
+				sendErrorPacket(ErrorCode.ILLEGAL_TFTP_OPERATION, ErrorCode.ILLEGAL_TFTP_OPERATION.getMessage());
 			}
 
 			sendSocket.close();
-		} catch (SocketException e) {
-			e.printStackTrace();
+		} catch (IOException e) {
+			System.err.println("Unexpected socket error");
 		}
-
-		System.out.println("Exit: " + Thread.currentThread().getId());
 	}
 
-	/**
-	 * Handles RRQ requests
-	 */
-	private void HandleRRQ() {
-		boolean netasciiMode = false;
+	private void handleRRQ() {
+		FileInputStream fileReader = null;
+		DatagramPacket inUDPPacket;
 		DataPacket outboundDataPacket;
+		AckPacket ackPack;
 		short block = 1;
-		sendBuffer = new byte[BUFSIZE];
-		netasciiMode = isNetASCIIMode(requestPacket.getMode());
-
-		// Sends error message if the file doesn't exist
-		if (!fileExists()) {
-			sendErrorPacket();
-			return;
-		}
 
 		try {
+			// Sends error message if the file doesn't exist
+			if (!fileExists(readDirectory)) {
+				System.err.print("File not found");
+				sendErrorPacket(ErrorCode.FILE_NOT_FOUND, ErrorCode.FILE_NOT_FOUND.getMessage());
+				return;
+			}
+
 			long sentBytes = 0;
 			long filesize = 0;
 
 			File file = new File(readDirectory.getAbsolutePath() + "/" + requestPacket.getRequestedFile());
-			FileInputStream fileReader = new FileInputStream(file);
+			
+			try {
+				fileReader = new FileInputStream(file);
+			} catch (IOException e) {
+				System.err.println("Cannot read file " + file.getAbsolutePath());
+				sendErrorPacket(ErrorCode.ACCESS_VIOLATION, ErrorCode.ACCESS_VIOLATION.getMessage());
+				return;
+			}
+			
 			filesize = file.length();
 
 			outboundDataPacket = new DataPacket(block, sendBuffer);
@@ -120,95 +122,202 @@ public class TFTPServerThread implements Runnable {
 
 			while (sentBytes < filesize && retransmissions < MAX_RETRANSMISSION) {
 				int readBytes = readdDataToByteBuffer(readData, fileReader);
-				
+
 				outboundDataPacket.setBlock(block);
 				outboundDataPacket.setData(readData, readBytes);
-				
-				sendDataPacket(outboundDataPacket);
+
+				sendTFTPPacket(outboundDataPacket);
 
 				// Wait for ack. If no ack or wrong ack, retransmission
 				boolean validAck = false;
 				while (!validAck && retransmissions < MAX_RETRANSMISSION) {
 					try {
-						waitForAck();
-						validAck = validAck(block, recivedBuffer);
+						inUDPPacket = waitForPacket(RETRANSMISSION_TIMEOUT);
 
-						if (!validAck) {
-							sendDataPacket(outboundDataPacket);
-							retransmissions++;
-							System.out.println("Wrong ack, retransmitting...");
+						// Checks the transferid, exists if it doesn't match
+						if (!correctTransferID(inUDPPacket)) {
+							sendErrorPacket(ErrorCode.UNKNOWN_TRANSFER_ID, ErrorCode.UNKNOWN_TRANSFER_ID.getMessage());
+							return;
 						}
 
+						try {
+							ackPack = new AckPacket(recivedBuffer);
+							validAck = validBlock(block, ackPack);
+						} catch (IllegalArgumentException | BufferUnderflowException e) {
+							validAck = false;
+						}
+
+						if (!validAck) {
+							sendTFTPPacket(outboundDataPacket);
+							retransmissions++;
+						}
+
+						// Sends packet again if no ack has been received
 					} catch (SocketTimeoutException e) {
-						System.out.println("No ack, retransmitting...");
-						sendDataPacket(outboundDataPacket);
+						sendTFTPPacket(outboundDataPacket);
+						retransmissions++;
 					}
 				}
 
+				retransmissions = 0;
 				sentBytes += readBytes;
 				block++;
 			}
+
+			if (retransmissions == MAX_RETRANSMISSION) {
+				sendErrorPacket(ErrorCode.NOT_DEFINED, "Retransmission rate limit reached");
+			}
+
 		} catch (IOException e) {
-			System.err.println(e.getMessage());
+			System.err.println("Error while sending datagram.");
+		}
+	}
+
+	private void handleWRQ() {
+		FileOutputStream fileWriter = null;
+		DatagramPacket udpPacket = null;
+		AckPacket outboundAckPacket;
+		DataPacket dataPack = null;
+		short block = 0;
+		int transmissionAttempts = 0;
+
+		try {
+			// Sends error message if the file exists
+			if (fileExists(writeDirectory)) {
+				System.err.print("File already exists");
+				sendErrorPacket(ErrorCode.FILE_ALREADY_EXISTS, ErrorCode.FILE_ALREADY_EXISTS.getMessage());
+				return;
+			}
+
+			if (requestPacket.getRequestedFile().length() == 0) {
+				System.err.println("No file specified in the write request");
+				sendErrorPacket(ErrorCode.ILLEGAL_TFTP_OPERATION, "No file specified");
+				return;
+			}
+
+			File file = new File(writeDirectory.getAbsolutePath() + "/" + requestPacket.getRequestedFile());
+
+			try {
+				fileWriter = new FileOutputStream(file, true);
+			} catch (IOException e) {
+				System.err.println("Cannot write to file " + file.getAbsolutePath());
+				sendErrorPacket(ErrorCode.ACCESS_VIOLATION, ErrorCode.ACCESS_VIOLATION.getMessage());
+				return;
+			}
+
+			outboundAckPacket = new AckPacket(block, sendBuffer);
+			outboundAckPacket.setBlock(block);
+			sendTFTPPacket(outboundAckPacket);
+			block++;
+
+			boolean endOfFile = false;
+			while (!endOfFile && transmissionAttempts < MAX_RECEIVE_ATTEMPTS) {
+				// Wait for data
+				boolean expectedDatapacket = false;
+				while (!expectedDatapacket) {
+					try {
+						udpPacket = waitForPacket(RECEIVE_TIMEOUT);
+
+						// Checks the transferid, exists if it doesn't match
+						if (!correctTransferID(udpPacket)) {
+							sendErrorPacket(ErrorCode.UNKNOWN_TRANSFER_ID, ErrorCode.UNKNOWN_TRANSFER_ID.getMessage());
+							return;
+						}
+
+						try {
+							dataPack = new DataPacket(recivedBuffer, udpPacket.getLength());
+							expectedDatapacket = validBlock(block, dataPack);
+							
+							//Acknowledge received data packet
+							outboundAckPacket.setBlock(dataPack.getBlock());
+							sendTFTPPacket(outboundAckPacket);
+						} catch (IllegalArgumentException | BufferUnderflowException e) {
+							// In case of broken package
+							expectedDatapacket = false;
+						}
+					} catch (SocketTimeoutException e) {
+						System.err.println("Data reciever timeout");
+						sendErrorPacket(ErrorCode.NOT_DEFINED, "Data reciever timeout");
+						fileWriter.close();
+						return;
+					}
+				}
+
+				// If expected data, increase block, write data to file
+				if (expectedDatapacket) {
+					transmissionAttempts = 0;
+					block++;
+					
+					if (!canFitOnDisk(file, dataPack.getLength())) {
+						System.err.println("Cannot write buffer to file, out of disk space");
+						sendErrorPacket(ErrorCode.DISK_FULL, ErrorCode.DISK_FULL.getMessage());
+						fileWriter.close();
+						return;
+					}
+
+					try {
+						fileWriter.write(dataPack.getData());
+					} catch (IOException e) {
+						System.err.println("Cannot write to file " + file.getAbsolutePath());
+
+						if (!file.canWrite())
+							sendErrorPacket(ErrorCode.ACCESS_VIOLATION, ErrorCode.ACCESS_VIOLATION.getMessage());
+						else
+							sendErrorPacket(ErrorCode.NOT_DEFINED, "Unexpected error when writing to file");
+
+						fileWriter.close();
+						return;
+					}
+				} else {
+					transmissionAttempts++;
+				}
+
+				if (expectedDatapacket && udpPacket.getLength() < 516) {
+					endOfFile = true;
+				}
+			}
+
+			fileWriter.close();
+		} catch (IOException e) {
+			System.err.println("Error while sending datagram");
 		}
 	}
 
 	// Sends data
-	private DatagramPacket sendDataPacket(DataPacket dataPack) throws IOException {
-		DatagramPacket outboundDatagramPacket = new DatagramPacket(dataPack.getBuffer(), 0, dataPack.getLength(),
+	private DatagramPacket sendTFTPPacket(TFTPPacket packet) throws IOException {
+		DatagramPacket outboundDatagramPacket = new DatagramPacket(packet.getBuffer(), 0, packet.getLength(),
 				clientAddress);
-		System.out.println(
-				"Send package of size " + dataPack.getLength() + " on thread " + Thread.currentThread().getId());
-
 		sendSocket.send(outboundDatagramPacket);
 
 		return outboundDatagramPacket;
 	}
 
-	private boolean receive_DATA_send_ACK() {
-		return true;
+	private void sendErrorPacket(ErrorCode errorcode, String message) throws IOException {
+		ErrorPacket errorPacket = new ErrorPacket(errorcode, message, sendBuffer);
+		sendTFTPPacket(errorPacket);
 	}
 
-	private void sendErrorPacket() {
-
-	}
-	
-	private boolean isNetASCIIMode(String mode) {
-		return mode.toLowerCase().contentEquals("netascii");	
-	}
-	
 	private boolean validMode(String mode) {
 		String modeLowerCase = mode.toLowerCase();
-		return modeLowerCase.contentEquals("netascii") || modeLowerCase.contentEquals("octet");	
+		return modeLowerCase.contentEquals("octet");
 	}
 
-	private void waitForAck() throws IOException, SocketTimeoutException {
-		DatagramPacket ackPack = new DatagramPacket(recivedBuffer, recivedBuffer.length);
+	private DatagramPacket waitForPacket(int timeoutTime) throws IOException, SocketTimeoutException {
+		DatagramPacket packet = new DatagramPacket(recivedBuffer, recivedBuffer.length);
 
-		System.out.println("Waiting for ack on thread " + Thread.currentThread().getId());
-		sendSocket.setSoTimeout(RETRANSMISSION_TIMEOUT);
-		sendSocket.receive(ackPack);
-		System.out.println("Ack recieved on thread " + Thread.currentThread().getId());
+		sendSocket.setSoTimeout(timeoutTime);
+		sendSocket.receive(packet);
+		return packet;
 	}
 
 	// Checks to make sure the received datagramPacket contains a proper ACK packet
 	// with the expected block
-	private boolean validAck(short expectedBlock, byte[] datagramPacket) {
-		try {
-			AckPacket ackPack = new AckPacket(datagramPacket);
-
-			if (ackPack.getBlock() != expectedBlock)
-				return false;
-		} catch (IllegalArgumentException | BufferUnderflowException e) {
-			return false;
-		}
-
-		return true;
+	private boolean validBlock(short expectedBlock, TFTPBlockPacket pack) {
+		return pack.getBlock() == expectedBlock;
 	}
 
 	// Read bytes from file and appends them to a ByteBuffer
 	private int readdDataToByteBuffer(byte[] buf, FileInputStream fileReader) throws IOException {
-
 		int readBytes = 0;
 		if (fileReader.available() > 0)
 			readBytes = fileReader.read(buf);
@@ -216,14 +325,30 @@ public class TFTPServerThread implements Runnable {
 		return readBytes;
 	}
 
-	private boolean fileExists() {
-		System.out.println(requestPacket.getRequestedFile());
+	private boolean fileExists(File directory) {
 		try {
-			Path path = Paths.get(readDirectory.getAbsolutePath() + "/" + requestPacket.getRequestedFile());
+			Path path = Paths.get(directory.getAbsolutePath() + "/" + requestPacket.getRequestedFile());
 
 			if (Files.notExists(path) && !Files.isDirectory(path))
 				return false;
 		} catch (InvalidPathException e) {
+			return false;
+		}
+
+		return true;
+	}
+
+	private boolean canFitOnDisk(File file, int bytesToWrite) {
+		if (file.getUsableSpace() < bytesToWrite) {
+			return false;
+		}
+
+		return true;
+	}
+
+	// Checks the transferID
+	private boolean correctTransferID(DatagramPacket incomingPacket) {
+		if (clientAddress.getPort() != incomingPacket.getPort()) {
 			return false;
 		}
 

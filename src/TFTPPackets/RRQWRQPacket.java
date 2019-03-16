@@ -23,24 +23,6 @@ public class RRQWRQPacket extends TFTPPacket {
 		length = byteBuffer.position();
 	}
 
-	private String readStringFromBuffer(int index) throws IllegalArgumentException {
-		StringBuilder stringBuilder = new StringBuilder();
-		byteBuffer.position(index);
-
-		try {
-			byte b = byteBuffer.get();
-
-			while (b != 0) {
-				stringBuilder.append((char) b);
-				b = byteBuffer.get();
-			}
-		} catch (BufferUnderflowException e) {
-			throw new IllegalArgumentException();
-		}
-
-		return stringBuilder.toString();
-	}
-
 	public String getRequestedFile() {
 		return requestedFile;
 	}
