@@ -55,24 +55,12 @@ public class TFTPServer {
 				System.err.println("Could not bind to ephemeral port");
 			} catch (IOException e) {
 				System.err.println("Could not recieve initial packet");
-			} catch (IllegalArgumentException e) {
-				System.err.println("Recieved package is not a TFTP packet");
 			}
-
 		}
 	}
 
-	/**
-	 * Reads the first block of data, i.e., the request for an action (read or
-	 * write).
-	 * 
-	 * @param socket (socket to read from)
-	 * @param buf    (where to store the read data)
-	 * @return socketAddress (the socket address of the client)
-	 * @throws IllegalArgumentException
-	 */
+	// Gets the IP and the transfer ID from the initial request
 	private InetSocketAddress receiveFrom(DatagramPacket packet) throws IllegalArgumentException {
-		// Get client address and port from the packet
 		InetAddress ip = packet.getAddress();
 		int port = packet.getPort();
 

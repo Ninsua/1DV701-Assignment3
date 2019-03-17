@@ -19,7 +19,7 @@ import TFTPPackets.*;
 
 public class TFTPServerThread implements Runnable {
 	private static final int RECEIVE_TIMEOUT = 10000;
-	private static final int RETRANSMISSION_TIMEOUT = 5000; // 5 seconds in milliseconds
+	private static final int RETRANSMISSION_TIMEOUT = 3000; // 3 seconds in milliseconds
 	private static final int MAX_RETRANSMISSION = 10;
 	private static final int MAX_RECEIVE_ATTEMPTS = 10;
 	public static final int BUFSIZE = 516;
@@ -39,53 +39,60 @@ public class TFTPServerThread implements Runnable {
 	public static final short OP_ERR = 5;
 
 	TFTPServerThread(InetSocketAddress clientAddress, byte[] datagramBuffer, File readDir, File writeDir)
-			throws IllegalArgumentException, SocketException {
+			throws SocketException {
 
 		this.clientAddress = clientAddress;
 		readDirectory = readDir;
 		writeDirectory = writeDir;
-		requestPacket = new RRQWRQPacket(datagramBuffer);
 		sendSocket = new DatagramSocket(0);
 		sendBuffer = new byte[516];
 		recivedBuffer = new byte[516];
+		
+		try {
+			requestPacket = new RRQWRQPacket(datagramBuffer);
+		} catch (IllegalArgumentException | BufferUnderflowException e) {
+			requestPacket = null;
+		}
 	}
 
 	public void run() {
 		try {
-			short opcode = requestPacket.getOpcode();
-			boolean validMode = validMode(requestPacket.getMode());
-
-			// Connect to client
-			sendSocket.connect(clientAddress);
-
-			System.out.printf("%s request for %s from %s using port %d on thread %d \n",
-					(opcode == OP_RRQ) ? "Read" : "Write", requestPacket.getRequestedFile(),
-					clientAddress.getHostName(), clientAddress.getPort(), Thread.currentThread().getId());
-
-			// Read request
-			if (opcode == OP_RRQ && validMode) {
-				handleRRQ();
-			}
-			// Write request
-			else if (opcode == OP_WRQ && validMode) {
-				handleWRQ();
-			}
-
-			else if (!validMode) {
-				sendErrorPacket(ErrorCode.NOT_DEFINED, "Unsupported mode");
-			}
-
-			else {
+			if (requestPacket == null) {
+				System.err.println("Illegal TFTP operation recieved");
 				sendErrorPacket(ErrorCode.ILLEGAL_TFTP_OPERATION, ErrorCode.ILLEGAL_TFTP_OPERATION.getMessage());
 			}
+			
+			else {
+				short opcode = requestPacket.getOpcode();
+				boolean validMode = validMode(requestPacket.getMode());
 
-			sendSocket.close();
-		} catch (IOException e) {
-			System.err.println("Unexpected socket error");
-		}
+				System.out.printf("%s request for %s from %s using port %d on thread %d \n",
+						(opcode == OP_RRQ) ? "Read" : "Write", requestPacket.getRequestedFile(),
+						clientAddress.getHostName(), clientAddress.getPort(), Thread.currentThread().getId());
+
+				// Read request
+				if (opcode == OP_RRQ && validMode) {
+					handleRRQ();
+				}
+				// Write request
+				else if (opcode == OP_WRQ && validMode) {
+					handleWRQ();
+				}
+
+				else if (!validMode) {
+					System.err.println("TFTP request with unsupported mode recieved");
+					sendErrorPacket(ErrorCode.NOT_DEFINED, "Unsupported mode");
+				}
+
+				sendSocket.close();
+			}
+			} catch (IOException e) {
+				//If the program is unable to send the error packets or unknown file IO errors
+				System.err.println("Unexpected socket error");
+			}		
 	}
 
-	private void handleRRQ() {
+	private void handleRRQ() throws IOException {
 		FileInputStream fileReader = null;
 		DatagramPacket inUDPPacket;
 		DataPacket outboundDataPacket;
@@ -137,6 +144,7 @@ public class TFTPServerThread implements Runnable {
 						// Checks the transferid, exists if it doesn't match
 						if (!correctTransferID(inUDPPacket)) {
 							sendErrorPacket(ErrorCode.UNKNOWN_TRANSFER_ID, ErrorCode.UNKNOWN_TRANSFER_ID.getMessage());
+							fileReader.close();
 							return;
 						}
 
@@ -158,22 +166,30 @@ public class TFTPServerThread implements Runnable {
 						retransmissions++;
 					}
 				}
+				
+				if (retransmissions == MAX_RETRANSMISSION) {
+					sendErrorPacket(ErrorCode.NOT_DEFINED, "Retransmission rate limit reached");
+					fileReader.close();
+					return;
+				}
 
 				retransmissions = 0;
 				sentBytes += readBytes;
-				block++;
-			}
-
-			if (retransmissions == MAX_RETRANSMISSION) {
-				sendErrorPacket(ErrorCode.NOT_DEFINED, "Retransmission rate limit reached");
+				
+				//Because there are no unsigned shorts in java
+				if (block == -1)
+					block = 1;
+				else
+					block++;
 			}
 
 		} catch (IOException e) {
 			System.err.println("Error while sending datagram.");
+			sendErrorPacket(ErrorCode.NOT_DEFINED, "Unexpected socket error");
 		}
 	}
 
-	private void handleWRQ() {
+	private void handleWRQ() throws IOException {
 		FileOutputStream fileWriter = null;
 		DatagramPacket udpPacket = null;
 		AckPacket outboundAckPacket;
@@ -221,6 +237,7 @@ public class TFTPServerThread implements Runnable {
 						// Checks the transferid, exists if it doesn't match
 						if (!correctTransferID(udpPacket)) {
 							sendErrorPacket(ErrorCode.UNKNOWN_TRANSFER_ID, ErrorCode.UNKNOWN_TRANSFER_ID.getMessage());
+							fileWriter.close();
 							return;
 						}
 
@@ -246,7 +263,12 @@ public class TFTPServerThread implements Runnable {
 				// If expected data, increase block, write data to file
 				if (expectedDatapacket) {
 					transmissionAttempts = 0;
-					block++;
+					
+					//Because there are no unsigned shorts in java
+					if (block == -1)
+						block = 1;
+					else
+						block++;
 					
 					if (!canFitOnDisk(file, dataPack.getLength())) {
 						System.err.println("Cannot write buffer to file, out of disk space");
@@ -280,6 +302,8 @@ public class TFTPServerThread implements Runnable {
 			fileWriter.close();
 		} catch (IOException e) {
 			System.err.println("Error while sending datagram");
+			sendErrorPacket(ErrorCode.NOT_DEFINED, "Unexpected socket error");
+			fileWriter.close();
 		}
 	}
 
@@ -307,6 +331,7 @@ public class TFTPServerThread implements Runnable {
 
 		sendSocket.setSoTimeout(timeoutTime);
 		sendSocket.receive(packet);
+		
 		return packet;
 	}
 
@@ -346,7 +371,7 @@ public class TFTPServerThread implements Runnable {
 		return true;
 	}
 
-	// Checks the transferID
+	// Checks the transferID ie port
 	private boolean correctTransferID(DatagramPacket incomingPacket) {
 		if (clientAddress.getPort() != incomingPacket.getPort()) {
 			return false;

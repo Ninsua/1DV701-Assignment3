@@ -7,7 +7,8 @@ public class DataPacket extends TFTPBlockPacket {
 
 	// Reads an existing TFTP packet from a buffer. If it does not match, exceptions
 	// are thrown
-	public DataPacket(byte[] datagramBuffer, int datagramLength) throws IllegalArgumentException, BufferUnderflowException {
+	public DataPacket(byte[] datagramBuffer, int datagramLength)
+			throws IllegalArgumentException, BufferUnderflowException {
 		super(datagramBuffer);
 
 		if (opcode != OP_DAT || datagramLength < 2 || datagramLength > 516) {
@@ -29,7 +30,7 @@ public class DataPacket extends TFTPBlockPacket {
 		setDataToBuffer(new byte[] { 0 }, 0);
 		length = 4;
 	}
-	
+
 	public byte[] getData() {
 		byte[] data = new byte[length - 4];
 		System.arraycopy(buf, 4, data, 0, length - 4);

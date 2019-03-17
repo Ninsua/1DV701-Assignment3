@@ -41,6 +41,7 @@ public class ProgramStart {
 			TFTPServer server = new TFTPServer(args[0], args[1], port);
 			server.start();
 		} catch (IOException e) {
+			//For unexpected errors, error message is given in the thrown exceptions.
 			System.out.println(e.getMessage());
 		}
 	}

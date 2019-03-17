@@ -10,7 +10,7 @@ public class ErrorPacket extends TFTPPacket {
 		setErrorcode(errorCode);
 		setMessage(message);
 	}
-	
+
 	public ErrorPacket(byte[] buffer) throws IllegalArgumentException {
 		super(OP_ERR, buffer);
 
@@ -31,7 +31,7 @@ public class ErrorPacket extends TFTPPacket {
 		length = setStringInBuffer(4, newMessage);
 		message = newMessage;
 	}
-	
+
 	public String getMessage() throws IllegalArgumentException {
 		return message;
 	}
